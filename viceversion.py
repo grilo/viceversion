@@ -45,6 +45,8 @@ def build_gradle(filepath):
     basedir = os.path.dirname(filepath)
     task_path = os.path.join(basedir, 'viceversion.task')
     gradlew = os.path.join(basedir, 'gradlew')
+    if not 'ANDROID_HOME' in os.environ:
+        logging.warning("ANDROID_HOME is not set, android detection WILL fail.")
 
     task = """
         allprojects {
@@ -86,7 +88,12 @@ def build_gradle(filepath):
         cmd += " -DsystemProp.https.proxyHost=%s" % (host)
         cmd += " -DsystemProp.https.proxyPort=%s" % (port)
 
-    out = shell_command(cmd).splitlines()
+    out = shell_command(cmd)
+    if not out:
+        logging.error("Unable to run ./gradlew, attempting gradle from $PATH.")
+        cmd = cmd.replace(gradlew, 'gradle')
+    out = shell_command(cmd)
+    out = out.splitlines()
     if len(out) > 1:
         logging.warning("Several versions found...")
     elif len(out) < 1:
