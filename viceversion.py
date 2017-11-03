@@ -7,6 +7,8 @@ import subprocess
 import shlex
 import json
 import urlparse
+import plistlib
+import re
 
 
 def shell_command(command):
@@ -22,8 +24,20 @@ def shell_command(command):
     return out
 
 
-def maven(filepath):
-    cmd = "mvn -f %s org.apache.maven.plugins:maven-help-plugin:2.1.1:evaluate  -Dexpression=project.version" % (filepath)
+def find_files(directory, pattern):
+    regex = re.compile(pattern)
+    found = []
+    for root, dirs, files in os.walk(directory):
+        for f in files:
+            path = os.path.join(root, f)
+            if regex.match(path):
+                found.append(path)
+    return found
+
+
+def maven(directory):
+    pom = find_files(directory, '.*pom.xml$')[0]
+    cmd = "mvn -f %s org.apache.maven.plugins:maven-help-plugin:2.1.1:evaluate  -Dexpression=project.version" % (pom)
     out = shell_command(cmd)
     for line in out.splitlines():
         if line.startswith('['):
@@ -31,20 +45,21 @@ def maven(filepath):
         return line
 
 
-def setup_py(filepath):
-    cmd = "python setup.py --version"
+def setup_py(directory):
+    setuppy = find_files(directory, '.*setup.py$')[0]
+    cmd = "python '%s' --version" % (setuppy)
     return shell_command(cmd)
 
 
-def package_json(filepath):
+def package_json(directory):
+    setuppy = find_files(directory, '.*package.json$')[0]
     contents = json.loads(open(filepath, 'r').read())
     return contents['version']
 
 
-def build_gradle(filepath):
-    basedir = os.path.dirname(filepath)
-    task_path = os.path.join(basedir, 'viceversion.task')
-    gradlew = os.path.join(basedir, 'gradlew')
+def build_gradle(directory):
+    task_path = os.path.join(directory, 'viceversion.task')
+    gradlew = os.path.join(directory, 'gradlew')
     if not 'ANDROID_HOME' in os.environ:
         logging.warning("ANDROID_HOME is not set, android detection WILL fail.")
 
@@ -70,8 +85,8 @@ def build_gradle(filepath):
     cmd = "gradle"
     if os.path.isfile(gradlew):
         cmd = os.path.join('.', gradlew)
-    cmd += " -b '%s'" % (filepath)
-    cmd += " -q -I '%s' printViceVersion" % (task_path)
+    cmd += ' -b "%s"' % (find_files(directory, '.*build.gradle$')[0])
+    cmd += ' -q -I "%s"' "printViceVersion" % (task_path)
 
     if 'http_proxy' in os.environ:
         result = urlparse.urlparse(os.environ['http_proxy'])
@@ -105,9 +120,24 @@ def build_gradle(filepath):
     return version
 
 
-def plist_ipa(filepath):
-    pass
-
+def info_plist(directory):
+    plist_files = find_files(directory, '.*Info.plist$')
+    short = None
+    version = None
+    for f in plist_files:
+        try:
+            pl = plistlib.readPlist(f)
+        except:
+            logging.warning("Invalid Info.plist file.")
+            continue
+        s, v = pl['CFBundleShortVersionString'], pl['CFBundleVersion']
+        if not short:
+            short, version = s, v
+        elif short == '1.0':
+            short, version = s, v
+    if version:
+        return short + '-' + version
+    return short
 
 def best_match(build_files):
     if len(build_files) == 0:
@@ -122,33 +152,26 @@ def best_match(build_files):
     return sorted(mod_time.iterkeys())[0]
 
 
-def get_driver(filepath):
+def get_driver(directory):
     drivers = {
         'pom.xml': maven,
         'setup.py': setup_py,
         'package.json': package_json,
         'build.gradle': build_gradle,
-        'Info.plist': plist_ipa,
+        'Info.plist': info_plist,
     }
-    f = os.path.basename(filepath)
-    if f in drivers.keys():
-        logging.debug("Found driver (%s) for file: %s", drivers[f].__name__, filepath)
-        return drivers[f]
 
+    for f in find_files(directory, '.*'):
+        basename = os.path.basename(f)
+        if not basename in drivers:
+            continue
+        logging.debug("Found driver (%s) for file: %s", drivers[basename].__name__, f)
+        return drivers[basename]
 
 def get_version(directory):
-    build_files = []
     logging.debug("Looking for build files in: %s", directory)
-    for root, dirs, files in os.walk(directory):
-        for f in files:
-            path = os.path.join(root, f)
-            if get_driver(path):
-                build_files.append(path)
-        break # Only search the root dir
-    logging.debug("Found build files: %s", ','.join(build_files))
-    build_file = best_match(build_files)
-    logging.info("Best match: %s", build_file)
-    version = get_driver(build_file)(build_file)
+    driver = get_driver(directory)
+    version = driver(directory)
     logging.info("Version: %s", version)
     return version
 
