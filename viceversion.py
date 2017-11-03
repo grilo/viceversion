@@ -6,50 +6,101 @@ import os
 import subprocess
 import shlex
 import json
+import urlparse
 
 
-def shellcommand(command):
+def shell_command(command):
     logging.debug("Running command: %s", command)
 
-    error = subprocess.PIPE
-    p = subprocess.Popen(shlex.split(command), \
-        stdout=subprocess.PIPE, \
-        stderr=subprocess.PIPE)
+    p = subprocess.Popen(shlex.split(command),
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
     out, err = p.communicate()
     if p.returncode != 0:
         logging.debug("Unable to execute (rc: %i): %s", p.returncode, command)
         return
     return out
 
+
 def maven(filepath):
     cmd = "mvn -f %s org.apache.maven.plugins:maven-help-plugin:2.1.1:evaluate  -Dexpression=project.version" % (filepath)
-    out = shellcommand(cmd)
+    out = shell_command(cmd)
     for line in out.splitlines():
         if line.startswith('['):
             pass
         return line
 
-def setuppy(filepath):
-    cmd = "python setup.py --version"
-    return shellcommand(cmd)
 
-def packagejson(filepath):
+def setup_py(filepath):
+    cmd = "python setup.py --version"
+    return shell_command(cmd)
+
+
+def package_json(filepath):
     contents = json.loads(open(filepath, 'r').read())
     return contents['version']
 
-def buildgradle(filepath):
+
+def build_gradle(filepath):
     basedir = os.path.dirname(filepath)
+    task_path = os.path.join(basedir, 'viceversion.task')
     gradlew = os.path.join(basedir, 'gradlew')
+
+    task = """
+        allprojects {
+            task printViceVersion {
+                doLast {
+                    if (project.hasProperty('android') && project.android.defaultConfig.versionCode != null) {
+                        println project.name + ":" + project.android.defaultConfig.versionCode + "-" + project.android.defaultConfig.versionName
+                    } else if (project.version != 'unspecified') {
+                        println project.name + ":" + project.version
+                    }
+                }
+            }
+        }
+    """
+
+    t = open(task_path, 'w')
+    t.write(task)
+    t.close()
+    logging.info("Wrote: %s", task_path)
+
     cmd = "gradle"
     if os.path.isfile(gradlew):
         cmd = os.path.join('.', gradlew)
-    out = shellcommand(cmd + " properties")
-    for line in out.splitlines():
-        if line.startswith('version: '):
-            return line[9:]
+    cmd += " -b '%s'" % (filepath)
+    cmd += " -q -I '%s' printViceVersion" % (task_path)
 
-def plistipa(filepath):
+    if 'http_proxy' in os.environ:
+        result = urlparse.urlparse(os.environ['http_proxy'])
+        host, port = result.netloc.split(':')
+        cmd += " -Dhttp.proxyHost=%s" % (host)
+        cmd += " -Dhttp.proxyPort=%s" % (port)
+        cmd += " -DsystemProp.http.proxyHost=%s" % (host)
+        cmd += " -DsystemProp.http.proxyPort=%s" % (port)
+    if 'https_proxy' in os.environ:
+        result = urlparse.urlparse(os.environ['https_proxy'])
+        host, port = result.netloc.split(':')
+        cmd += " -Dhttps.proxyHost=%s" % (host)
+        cmd += " -Dhttps.proxyPort=%s" % (port)
+        cmd += " -DsystemProp.https.proxyHost=%s" % (host)
+        cmd += " -DsystemProp.https.proxyPort=%s" % (port)
+
+    out = shell_command(cmd).splitlines()
+    if len(out) > 1:
+        logging.warning("Several versions found...")
+    elif len(out) < 1:
+        logging.critical("No versions found...")
+        return None
+    logging.info("Found version: %s", out[0])
+    version = out[0].split(':')[1]
+    os.unlink(task_path)
+    return version
+
+
+def plist_ipa(filepath):
     pass
+
 
 def best_match(build_files):
     if len(build_files) == 0:
@@ -63,18 +114,20 @@ def best_match(build_files):
         mod_time[mtime] = f
     return sorted(mod_time.iterkeys())[0]
 
+
 def get_driver(filepath):
     drivers = {
         'pom.xml': maven,
-        'setup.py': setuppy,
-        'package.json': packagejson,
-        'build.gradle': buildgradle,
-        'Info.plist': plistipa,
+        'setup.py': setup_py,
+        'package.json': package_json,
+        'build.gradle': build_gradle,
+        'Info.plist': plist_ipa,
     }
     f = os.path.basename(filepath)
     if f in drivers.keys():
         logging.debug("Found driver (%s) for file: %s", drivers[f].__name__, filepath)
         return drivers[f]
+
 
 def get_version(directory):
     build_files = []
@@ -87,20 +140,21 @@ def get_version(directory):
         break # Only search the root dir
     logging.debug("Found build files: %s", ','.join(build_files))
     build_file = best_match(build_files)
-    logging.debug("Best match: %s", build_file)
+    logging.info("Best match: %s", build_file)
     version = get_driver(build_file)(build_file)
-    logging.debug("Version: %s", version)
+    logging.info("Version: %s", version)
     return version
+
 
 if __name__ == '__main__':
 
     desc = 'Generate a shell script that runs a build.'
     parser = argparse.ArgumentParser(description=desc)
 
-    parser.add_argument("-v", "--verbose", action="store_true", \
-        help="Increase output verbosity")
-    parser.add_argument("-d", "--directory", default=os.getcwd(), \
-        help="The directory to look for a build file.")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Increase output verbosity")
+    parser.add_argument("-d", "--directory", default=os.getcwd(),
+                        help="The directory to look for a build file.")
 
     args = parser.parse_args()
 
