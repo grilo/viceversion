@@ -9,6 +9,11 @@ import json
 import urlparse
 import plistlib
 import re
+import sys
+
+
+class VersionNotFoundError(Exception):
+    pass
 
 
 def shell_command(command):
@@ -28,6 +33,8 @@ def find_files(directory, pattern):
     regex = re.compile(pattern)
     found = []
     for root, dirs, files in os.walk(directory):
+        if '/.' in root:
+            continue
         for f in files:
             path = os.path.join(root, f)
             if regex.match(path):
@@ -37,11 +44,14 @@ def find_files(directory, pattern):
 
 def maven(directory):
     pom = find_files(directory, '.*pom.xml$')[0]
-    cmd = "mvn -f %s org.apache.maven.plugins:maven-help-plugin:2.1.1:evaluate  -Dexpression=project.version" % (pom)
+    cmd = "mvn -B -f %s org.apache.maven.plugins:maven-help-plugin:2.1.1:evaluate  -Dexpression=project.version" % (pom)
     out = shell_command(cmd)
+    if not out:
+        logging.critical("Either parsing error or missing <version> tag: %s", cmd)
+        raise VersionNotFoundError
     for line in out.splitlines():
         if line.startswith('['):
-            pass
+            continue
         return line
 
 
@@ -52,8 +62,11 @@ def setup_py(directory):
 
 
 def package_json(directory):
-    setuppy = find_files(directory, '.*package.json$')[0]
-    contents = json.loads(open(filepath, 'r').read())
+    packagejson = find_files(directory, '.*package.json$')[0]
+    contents = json.loads(open(packagejson, 'r').read())
+    if not 'version' in contents:
+        logging.critical("Unable to find 'version' key package.json: %s", packagejson)
+        raise VersionNotFoundError
     return contents['version']
 
 
@@ -113,7 +126,7 @@ def build_gradle(directory):
         logging.warning("Several versions found...")
     elif len(out) < 1:
         logging.critical("No versions found...")
-        return None
+        raise VersionNotFoundError
     logging.info("Found version: %s", out[0])
     version = out[0].split(':')[1]
     os.unlink(task_path)
@@ -165,13 +178,14 @@ def get_driver(directory):
         basename = os.path.basename(f)
         if not basename in drivers:
             continue
-        logging.debug("Found driver (%s) for file: %s", drivers[basename].__name__, f)
+        logging.info("Using driver (%s) for: %s", drivers[basename].__name__, directory)
         return drivers[basename]
 
 def get_version(directory):
-    logging.debug("Looking for build files in: %s", directory)
     driver = get_driver(directory)
-    version = driver(directory)
+    if not driver:
+        raise VersionNotFoundError
+    version = driver(directory).strip()
     logging.info("Version: %s", version)
     return version
 
@@ -194,4 +208,8 @@ if __name__ == '__main__':
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    print get_version(args.directory)
+    try:
+        print get_version(args.directory)
+    except VersionNotFoundError:
+        logging.critical("Unable to find version for: %s", args.directory)
+        sys.exit(1)
